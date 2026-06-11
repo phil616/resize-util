@@ -177,31 +177,18 @@ def _scale_fill(make, target, q, smin, smax, iters=16, tol=0.004):
     return best
 
 
-def compress_to_target(img, target, qmin, qmax, fmt, min_scale):
-    """搜索 (缩放, 质量)，使【最终格式】体积 <= target 且尽量接近（精确逼近）。
-    关键：体积按真实输出格式测量、缩放作连续精密杠杆，故对 png/webp 等也准确。
-    返回 (data_bytes, scale, q, size, feasible)；data 已是 fmt 的最终字节。"""
-    lossy = fmt in LOSSY_FMTS
-
+def _lossy_to_target(img, target, qmin, qmax, min_scale, fmt):
+    """lossy 格式（jpeg/webp）下逼近 target。返回 (data, scale, q, size, feasible)。
+    优先保分辨率二分质量，再用连续缩放填满整数质量留下的余量。"""
     def make(scale, q):
         return encode_to(scaled(img, scale), q, fmt)
 
-    # 满分辨率 + 最高质量已 <= target？无法再变大（不放大），直接返回
     top = make(1.0, qmax)
-    if len(top) <= target:
-        return top, 1.0, (qmax if lossy else 0), len(top), True
+    if len(top) <= target:                       # 满分辨率最高质量已达标（不放大）
+        return top, 1.0, qmax, len(top), True
 
-    if not lossy:
-        # 无损/格式自带压缩：质量无意义，仅靠连续缩放精确逼近
-        r = _scale_fill(make, target, 0, min_scale, 1.0)
-        if r:
-            return r[0], r[1], 0, len(r[0]), True
-        data = make(min_scale, 0)
-        return data, min_scale, 0, len(data), False
-
-    # lossy：优先保分辨率，全分辨率下二分整数质量
     full_lo = make(1.0, qmin)
-    if len(full_lo) <= target:
+    if len(full_lo) <= target:                   # 质量杠杆即可达标，保满分辨率
         loq, hiq, bq, bdata = qmin, qmax, qmin, full_lo
         while loq <= hiq:
             mid = (loq + hiq) // 2
@@ -211,19 +198,36 @@ def compress_to_target(img, target, qmin, qmax, fmt, min_scale):
                 loq = mid + 1
             else:
                 hiq = mid - 1
-        # 整数质量量化会留下余量：用 q=bq+1（全分辨率超标）+ 连续缩放填满，更贴近 target
-        if bq < qmax:
+        if bq < qmax:                            # 用 q=bq+1 + 连续缩放填满余量
             r = _scale_fill(make, target, bq + 1, min_scale, 1.0)
             if r and len(r[0]) > len(bdata):
                 return r[0], r[1], bq + 1, len(r[0]), True
         return bdata, 1.0, bq, len(bdata), True
 
-    # 全分辨率最低质量仍超标 → 在 qmin 上连续缩放精确逼近
-    r = _scale_fill(make, target, qmin, min_scale, 1.0)
+    r = _scale_fill(make, target, qmin, min_scale, 1.0)   # 最低质量仍超标→缩放
     if r:
         return r[0], r[1], qmin, len(r[0]), True
-    data = make(min_scale, qmin)
+    data = make(min_scale, qmin)                 # 连最小分辨率都超标
     return data, min_scale, qmin, len(data), False
+
+
+def compress_to_target(img, target, qmin, qmax, fmt, min_scale):
+    """逼近 target，体积按【最终格式】实测。无损格式压不到目标时**自动转 JPEG**
+    （只关心大小，不在乎质量/透明）。返回 (data, scale, q, size, feasible, out_fmt)。"""
+    if fmt in LOSSY_FMTS:
+        d, s, q, sz, ok = _lossy_to_target(img, target, qmin, qmax, min_scale, fmt)
+        return d, s, q, sz, ok, fmt
+
+    # 无损格式（png/bmp/tiff）：只能靠降分辨率，先试无损
+    def make(scale, q):
+        return encode_to(scaled(img, scale), q, fmt)
+
+    r = _scale_fill(make, target, 0, min_scale, 1.0)
+    if r:                                        # 无损即可达标，保留原格式
+        return r[0], r[1], 0, len(r[0]), True, fmt
+    # 无损压不到目标 → 转 JPEG 给你压到大小
+    d, s, q, sz, ok = _lossy_to_target(img, target, qmin, qmax, min_scale, "jpeg")
+    return d, s, q, sz, ok, "jpeg"
 
 
 def render_output(jpeg: bytes, fmt: str) -> tuple[bytes, str]:
@@ -256,10 +260,9 @@ class Result:
 def out_path_for(path: str, ext: str, opts) -> str:
     d, base = os.path.split(path)
     stem = os.path.splitext(base)[0]
-    if opts.inplace:
-        return path  # 原地覆盖（格式锁定为原格式，见 process）
-    name = stem + opts.suffix + ext
-    return os.path.join(opts.out_dir or d, name)
+    if opts.inplace:                       # 原地：保留名字，扩展名随实际格式
+        return os.path.join(d, stem + ext)
+    return os.path.join(opts.out_dir or d, stem + opts.suffix + ext)
 
 
 def process(path: str, opts) -> Result:
@@ -269,34 +272,42 @@ def process(path: str, opts) -> Result:
         if opts.max_dimension:
             img = cap_dimension(img, opts.max_dimension)
 
-        fmt = EXT_FMT.get(os.path.splitext(path)[1].lower(), "jpeg") \
+        req_fmt = EXT_FMT.get(os.path.splitext(path)[1].lower(), "jpeg") \
             if opts.inplace else resolve_format(path, opts.to)
 
         if opts.target:
-            # 直接按最终格式搜索，体积可精确控制（data 已是 fmt 字节）
-            data, scale, q, _, feasible = compress_to_target(
-                img, opts.target, opts.qmin, opts.qmax, fmt, opts.min_scale)
-            ext = FMT_EXT.get(fmt, "." + fmt)
+            # 按最终格式精确逼近；无损压不到目标会自动转 jpg（见 compress_to_target）
+            data, scale, q, _, feasible, fmt = compress_to_target(
+                img, opts.target, opts.qmin, opts.qmax, req_fmt, opts.min_scale)
             tag = (f"scale={scale:.3g}" + (f" q={q}" if fmt in LOSSY_FMTS else "")
                    + ("" if feasible else " 未达标"))
         else:
-            # 固定质量：保留“转 JPEG 压缩再转回原格式”的语义
+            # 固定质量：转 JPEG 压缩再转回原格式
+            fmt = req_fmt
             jpeg = encode_jpeg(img, opts.quality)
-            data, ext = render_output(jpeg, fmt)
+            data, _ = render_output(jpeg, fmt)
+            # 只关心大小：无损格式压不过原图就退回 jpg
+            if not opts.allow_larger and fmt not in LOSSY_FMTS and len(data) >= orig:
+                data, fmt = jpeg, "jpeg"
             feasible = True
             tag = f"q={opts.quality}"
 
-        out = path if opts.inplace else out_path_for(path, ext, opts)
+        ext = FMT_EXT.get(fmt, "." + fmt)
+        if fmt != req_fmt:                       # 发生了 png/bmp→jpg 回退
+            tag += f"  {req_fmt}->jpg"
+        out = out_path_for(path, ext, opts)
 
         if not opts.allow_larger and len(data) >= orig:
-            hint = "（试 --to jpg 以真正压缩）" if fmt != "jpeg" else ""
             return Result(path, None, orig, len(data),
-                          f"结果 {human(len(data))} ≥ 原图，跳过{hint}", "skipped")
+                          f"结果 {human(len(data))} ≥ 原图，跳过", "skipped")
 
         if opts.out_dir:
             os.makedirs(opts.out_dir, exist_ok=True)
         with open(out, "wb") as f:
             f.write(data)
+        if opts.inplace and os.path.abspath(out) != os.path.abspath(path) \
+                and os.path.exists(path):
+            os.remove(path)                      # 原地且换了扩展名：删掉旧文件
         ratio = 100 * (1 - len(data) / orig) if orig else 0
         status = "ok" if feasible else "over"
         return Result(path, out, orig, len(data),
@@ -387,7 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out-dir", default=None, help="输出目录（默认与源文件同目录）")
     ap.add_argument("--suffix", default=".min", help="输出文件名后缀（非 --inplace 时）")
     ap.add_argument("--inplace", action="store_true",
-                    help="原地覆盖源文件（格式锁定为原格式，忽略 --to）")
+                    help="原地替换源文件（忽略 --to；无损压不到目标会转 jpg 并删除原文件）")
     ap.add_argument("--allow-larger", action="store_true",
                     help="允许写出比原图更大的结果（默认跳过）")
     ap.add_argument("--recursive", action="store_true", help="递归处理目录")
