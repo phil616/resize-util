@@ -17,6 +17,7 @@ import os
 import queue
 import sys
 import threading
+import webbrowser
 
 # tkinter 延迟到真正打开界面时再导入：无界面自检 / CI smoke test 不依赖图形库，
 # 打包后的 EXE 即便缺图形环境也能跑 RESIZE_SELFTEST。
@@ -109,11 +110,21 @@ class App:
 
         # 状态栏 + 进度条
         bar = ttk.Frame(root)
-        bar.pack(fill="x", padx=10, pady=(0, 10))
+        bar.pack(fill="x", padx=10, pady=(0, 2))
         self.status = tk.StringVar(value="就绪")
         ttk.Label(bar, textvariable=self.status).pack(side="left")
         self.progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
         self.progress.pack(side="right")
+
+        # 底部信息栏
+        footer = ttk.Frame(root)
+        footer.pack(fill="x", padx=10, pady=(0, 8))
+        gh_link = tk.Label(footer, text="GitHub: phil616/resize-util",
+                           fg="#0366d6", cursor="hand2", font=("", 9))
+        gh_link.pack(side="left")
+        gh_link.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/phil616/resize-util"))
+        ttk.Label(footer, text="  |  Made by phil616",
+                  font=("", 9)).pack(side="left")
 
     # ── 控件辅助 ──────────────────────────────────────────────────────────────
 
