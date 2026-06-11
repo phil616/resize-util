@@ -1,0 +1,35 @@
+# ── 文本：统一按 LF 规范化，避免跨平台换行符污染 ──────────────
+* text=auto eol=lf
+
+# Windows 脚本需要 CRLF 才能正确执行
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+# Unix 脚本保持 LF
+*.sh   text eol=lf
+
+# 明确声明为文本（防止被误判为二进制）
+*.py    text
+*.toml  text
+*.md    text
+*.yml   text
+*.yaml  text
+*.spec  text
+*.cfg   text
+
+# ── 二进制：用 Git LFS 跟踪（git-lfs 已安装）──────────────────
+# 大体积/不可 diff 的二进制资源走 LFS，仓库里只存指针，clone 更轻。
+*.pdf   filter=lfs diff=lfs merge=lfs -text
+*.png   filter=lfs diff=lfs merge=lfs -text
+*.jpg   filter=lfs diff=lfs merge=lfs -text
+*.jpeg  filter=lfs diff=lfs merge=lfs -text
+*.gif   filter=lfs diff=lfs merge=lfs -text
+*.webp  filter=lfs diff=lfs merge=lfs -text
+*.bmp   filter=lfs diff=lfs merge=lfs -text
+*.tif   filter=lfs diff=lfs merge=lfs -text
+*.tiff  filter=lfs diff=lfs merge=lfs -text
+*.ico   filter=lfs diff=lfs merge=lfs -text
+*.zip   filter=lfs diff=lfs merge=lfs -text
+
+# ── linguist：锁文件不计入语言统计 ───────────────────────────
+uv.lock linguist-generated=true

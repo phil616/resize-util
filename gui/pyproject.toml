@@ -1,0 +1,19 @@
+[project]
+name = "resize-gui"
+version = "0.1.0"
+description = "把 pdf-resize 与 image-resize 两个压缩工具集成到一个 tkinter 图形界面"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "phil616" }]
+requires-python = ">=3.12"
+# tkinter 随 Python 自带；这里装的是两个子工具各自需要的库，
+# 以便 GUI 直接复用它们 main.py 里的 run()。
+dependencies = [
+    "img2pdf>=0.6.3",
+    "pillow>=10.0.0",
+    "pymupdf>=1.27.2.3",
+]
+
+# 仅打包时需要：pyinstaller。运行 EXE 的最终用户不需要它。
+[dependency-groups]
+build = ["pyinstaller>=6.0"]

@@ -1,0 +1,46 @@
+name: build-windows-exe
+
+# 在 GitHub 的 Windows 机器上自动打包单文件 ResizeTools.exe，
+# 这样即使你手头没有 Windows 也能拿到 .exe（在 Actions 里下载 artifact）。
+on:
+  workflow_dispatch:        # 手动触发
+  push:
+    branches: ["main", "master"]   # 推送主分支即构建
+    tags: ["v*"]                    # 打 tag（如 v0.1.0）时自动构建
+    paths-ignore:                  # 仅文档改动不触发
+      - "**/*.md"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      # 用 python.org 官方 3.12（自带 Tcl/Tk 8.6，PyInstaller 打包 tkinter 最稳）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: python -m pip install --upgrade pip pyinstaller pymupdf img2pdf pillow
+
+      - name: Build single-file exe
+        run: pyinstaller resize-gui.spec --noconfirm --clean
+
+      - name: Smoke test (headless, no display needed)
+        env:
+          RESIZE_SELFTEST: "1"
+        run: |
+          # windowed EXE 不会阻塞 shell，必须用 Start-Process -Wait 才能拿到退出码
+          $p = Start-Process -FilePath ".\dist\ResizeTools.exe" -Wait -PassThru
+          Write-Host "selftest exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ResizeTools-windows
+          path: gui/dist/ResizeTools.exe
+          if-no-files-found: error
