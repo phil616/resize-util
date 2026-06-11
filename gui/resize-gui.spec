@@ -70,6 +70,6 @@ exe = EXE(
     upx=False,            # UPX 可能损坏 PyMuPDF 的二进制，关闭更稳
     runtime_tmpdir=None,
     console=False,        # GUI 程序，不弹黑色控制台窗口
-    disable_windowed_traceback=False,
+    disable_windowed_traceback=True,   # 未捕捉异常时直接退出，不弹模态对话框（CI 不会挂死）
     icon=None,            # 如需图标：把 .ico 路径填这里
 )

@@ -419,32 +419,56 @@ class App:
         self.log.configure(state="disabled")
 
 
+def _selftest_emit(msg: str) -> None:
+    """把自检结果同时打到 stdout 和 RESIZE_SELFTEST_LOG 指向的文件。
+    打包成 windowed EXE 后没有 stdout，文件是 CI 能看到结果的唯一途径。"""
+    try:
+        print(msg)
+    except Exception:  # noqa: BLE001
+        pass
+    logf = os.environ.get("RESIZE_SELFTEST_LOG")
+    if logf:
+        try:
+            with open(logf, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _selftest() -> int:
-    """无界面冒烟自检：跑通三大重依赖（Pillow / img2pdf / PyMuPDF）与
-    子工具的动态加载。用于验证打包后的 EXE（设 RESIZE_SELFTEST=1 触发），
-    也可作为 CI 的 smoke test，无需图形环境。"""
+    """无界面冒烟自检：跑通三大重依赖（Pillow / img2pdf / PyMuPDF）与子工具的
+    动态加载。验证打包后的 EXE（设 RESIZE_SELFTEST=1 触发），也用作 CI smoke test。
+
+    关键：全程 try/except，绝不让异常向外抛 —— 否则 windowed EXE 会弹出一个
+    模态的 traceback 对话框并永久阻塞（在 CI 里无人点击，任务会一直挂着）。"""
     import tempfile
-    import fitz
-    from PIL import Image
+    import traceback
+    try:
+        import fitz
+        from PIL import Image
 
-    d = tempfile.mkdtemp()
-    ip = os.path.join(d, "t.png")
-    Image.new("RGB", (80, 80), (20, 180, 90)).save(ip)
-    ic = img_mod.run(img_mod.build_parser().parse_args([ip, "--to", "jpg"]))
+        d = tempfile.mkdtemp()
+        ip = os.path.join(d, "t.png")
+        Image.new("RGB", (80, 80), (20, 180, 90)).save(ip)
+        ic = img_mod.run(img_mod.build_parser().parse_args([ip, "--to", "jpg"]))
 
-    pp, op = os.path.join(d, "t.pdf"), os.path.join(d, "t.out.pdf")
-    doc = fitz.open()
-    doc.new_page(width=300, height=400).insert_text((50, 50), "hello")
-    doc.save(pp)
-    doc.close()
-    pc = pdf_mod.run(pdf_mod.build_parser().parse_args(
-        [pp, "--target", "100K", "-o", op, "--quiet"]))
+        pp, op = os.path.join(d, "t.pdf"), os.path.join(d, "t.out.pdf")
+        doc = fitz.open()
+        doc.new_page(width=300, height=400).insert_text((50, 50), "hello")
+        doc.save(pp)
+        doc.close()
+        pc = pdf_mod.run(pdf_mod.build_parser().parse_args(
+            [pp, "--target", "100K", "-o", op, "--quiet"]))
 
-    ok = ic == 0 and pc in (0, 1) and os.path.exists(op)
-    print(f"SELFTEST image_code={ic} pdf_code={pc} "
-          f"pdf_out={os.path.getsize(op) if os.path.exists(op) else 'MISSING'} "
-          f"-> {'OK' if ok else 'FAIL'}")
-    return 0 if ok else 1
+        ok = ic == 0 and pc in (0, 1) and os.path.exists(op)
+        _selftest_emit(
+            f"SELFTEST image_code={ic} pdf_code={pc} "
+            f"pdf_out={os.path.getsize(op) if os.path.exists(op) else 'MISSING'} "
+            f"-> {'OK' if ok else 'FAIL'}")
+        return 0 if ok else 1
+    except BaseException:  # noqa: BLE001  绝不外抛，避免 windowed 模态弹窗
+        _selftest_emit("SELFTEST CRASH:\n" + traceback.format_exc())
+        return 3
 
 
 def main():
