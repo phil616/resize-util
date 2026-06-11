@@ -133,42 +133,97 @@ def encode_jpeg(img: Image.Image, q: int) -> bytes:
     return buf.getvalue()
 
 
-def build_scales(min_scale: float, step: float) -> list[float]:
-    scales, s = [1.0], 1.0
-    while s > min_scale:
-        s *= step
-        scales.append(round(max(s, min_scale), 4))
-        if s <= min_scale:
-            break
-    return scales
+LOSSY_FMTS = {"jpeg", "webp"}  # 质量是有效体积杠杆的格式；其余（png/bmp/tiff）靠缩放
 
 
-def compress_to_target(img, target, qmin, qmax, scales):
-    """在 (缩放, 质量) 空间搜索 <= target 的最佳方案。
-    返回 (jpeg_bytes, scale, q, size, feasible)。"""
-    best = None  # (size, jpeg, scale, q) 全部超标时的兜底
-    for scale in scales:
-        im = scaled(img, scale)
-        lo = encode_jpeg(im, qmin)
-        if len(lo) > target:  # 此分辨率最低质量都超标，继续缩小
-            if best is None or len(lo) < best[0]:
-                best = (len(lo), lo, scale, qmin)
-            continue
-        hi = encode_jpeg(im, qmax)
-        if len(hi) <= target:  # 最高质量即达标
-            return hi, scale, qmax, len(hi), True
-        loq, hiq, bq, bj = qmin, qmax, qmin, lo  # 二分质量
+def encode_to(im: Image.Image, q: int, fmt: str) -> bytes:
+    """把图像直接编码为【最终输出格式】的字节，体积可精确测量/控制。
+    lossy 格式用 q 作质量；无损格式（png/bmp/tiff）忽略 q，靠分辨率控体积。"""
+    buf = io.BytesIO()
+    if fmt == "jpeg":
+        im.save(buf, format="JPEG", quality=q, optimize=True,
+                progressive=True, subsampling="4:2:0")
+    elif fmt == "webp":
+        im.save(buf, format="WEBP", quality=q, method=6)
+    elif fmt == "png":
+        im.save(buf, format="PNG", optimize=True)
+    elif fmt == "tiff":
+        im.save(buf, format="TIFF", compression="tiff_deflate")
+    else:  # bmp 等
+        im.save(buf, format=fmt.upper())
+    return buf.getvalue()
+
+
+def _scale_fill(make, target, q, smin, smax, iters=16, tol=0.004):
+    """在 [smin, smax] 连续二分缩放比例，找使 make(s,q) <= target 的最大 s。
+    体积随分辨率单调，故能精确逼近 target。返回 (data, scale) 或 None（最小也超标）。"""
+    d_hi = make(smax, q)
+    if len(d_hi) <= target:          # 满分辨率即达标
+        return d_hi, smax
+    d_lo = make(smin, q)
+    if len(d_lo) > target:           # 最小分辨率也超标 → 不可行
+        return None
+    best, lo, hi = (d_lo, smin), smin, smax
+    for _ in range(iters):
+        mid = (lo + hi) / 2.0
+        d = make(mid, q)
+        n = len(d)
+        if n <= target:
+            best, lo = (d, mid), mid
+            if target - n <= tol * target:   # 已足够接近，提前收敛
+                break
+        else:
+            hi = mid
+    return best
+
+
+def compress_to_target(img, target, qmin, qmax, fmt, min_scale):
+    """搜索 (缩放, 质量)，使【最终格式】体积 <= target 且尽量接近（精确逼近）。
+    关键：体积按真实输出格式测量、缩放作连续精密杠杆，故对 png/webp 等也准确。
+    返回 (data_bytes, scale, q, size, feasible)；data 已是 fmt 的最终字节。"""
+    lossy = fmt in LOSSY_FMTS
+
+    def make(scale, q):
+        return encode_to(scaled(img, scale), q, fmt)
+
+    # 满分辨率 + 最高质量已 <= target？无法再变大（不放大），直接返回
+    top = make(1.0, qmax)
+    if len(top) <= target:
+        return top, 1.0, (qmax if lossy else 0), len(top), True
+
+    if not lossy:
+        # 无损/格式自带压缩：质量无意义，仅靠连续缩放精确逼近
+        r = _scale_fill(make, target, 0, min_scale, 1.0)
+        if r:
+            return r[0], r[1], 0, len(r[0]), True
+        data = make(min_scale, 0)
+        return data, min_scale, 0, len(data), False
+
+    # lossy：优先保分辨率，全分辨率下二分整数质量
+    full_lo = make(1.0, qmin)
+    if len(full_lo) <= target:
+        loq, hiq, bq, bdata = qmin, qmax, qmin, full_lo
         while loq <= hiq:
             mid = (loq + hiq) // 2
-            j = encode_jpeg(im, mid)
-            if len(j) <= target:
-                bq, bj = mid, j
+            d = make(1.0, mid)
+            if len(d) <= target:
+                bq, bdata = mid, d
                 loq = mid + 1
             else:
                 hiq = mid - 1
-        return bj, scale, bq, len(bj), True
-    size, jpeg, scale, q = best
-    return jpeg, scale, q, size, False
+        # 整数质量量化会留下余量：用 q=bq+1（全分辨率超标）+ 连续缩放填满，更贴近 target
+        if bq < qmax:
+            r = _scale_fill(make, target, bq + 1, min_scale, 1.0)
+            if r and len(r[0]) > len(bdata):
+                return r[0], r[1], bq + 1, len(r[0]), True
+        return bdata, 1.0, bq, len(bdata), True
+
+    # 全分辨率最低质量仍超标 → 在 qmin 上连续缩放精确逼近
+    r = _scale_fill(make, target, qmin, min_scale, 1.0)
+    if r:
+        return r[0], r[1], qmin, len(r[0]), True
+    data = make(min_scale, qmin)
+    return data, min_scale, qmin, len(data), False
 
 
 def render_output(jpeg: bytes, fmt: str) -> tuple[bytes, str]:
@@ -218,14 +273,19 @@ def process(path: str, opts) -> Result:
             if opts.inplace else resolve_format(path, opts.to)
 
         if opts.target:
-            jpeg, scale, q, _, feasible = compress_to_target(
-                img, opts.target, opts.qmin, opts.qmax, opts.scales)
-            tag = f"scale={scale:g} q={q}" + ("" if feasible else " 未达标")
+            # 直接按最终格式搜索，体积可精确控制（data 已是 fmt 字节）
+            data, scale, q, _, feasible = compress_to_target(
+                img, opts.target, opts.qmin, opts.qmax, fmt, opts.min_scale)
+            ext = FMT_EXT.get(fmt, "." + fmt)
+            tag = (f"scale={scale:.3g}" + (f" q={q}" if fmt in LOSSY_FMTS else "")
+                   + ("" if feasible else " 未达标"))
         else:
-            jpeg, q, feasible = encode_jpeg(img, opts.quality), opts.quality, True
-            tag = f"q={q}"
+            # 固定质量：保留“转 JPEG 压缩再转回原格式”的语义
+            jpeg = encode_jpeg(img, opts.quality)
+            data, ext = render_output(jpeg, fmt)
+            feasible = True
+            tag = f"q={opts.quality}"
 
-        data, ext = render_output(jpeg, fmt)
         out = path if opts.inplace else out_path_for(path, ext, opts)
 
         if not opts.allow_larger and len(data) >= orig:
@@ -279,7 +339,6 @@ def run(args) -> int:
         print("错误：没有可处理的图像", file=sys.stderr)
         return 2
 
-    args.scales = build_scales(args.min_scale, args.scale_step)
     jobs = max(1, min(args.jobs or (os.cpu_count() or 1), len(files)))
     log = print if not args.quiet else (lambda *a, **k: None)
 
@@ -313,15 +372,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("input", nargs="+", help="图像文件 / 目录 / 通配符")
     ap.add_argument("--target", type=parse_size, default=None,
-                    help="目标体积上限，如 80K / 500K（启用缩放+质量搜索）")
+                    help="目标体积上限，如 80K / 500K（按最终格式精确逼近，<= 目标）")
     ap.add_argument("--quality", type=int, default=30,
                     help="无 --target 时的固定 JPEG 质量")
-    ap.add_argument("--qmin", type=int, default=5, help="--target 搜索的最低质量")
-    ap.add_argument("--qmax", type=int, default=90, help="--target 搜索的最高质量")
+    ap.add_argument("--qmin", type=int, default=5, help="--target 搜索的最低质量（lossy 格式）")
+    ap.add_argument("--qmax", type=int, default=90, help="--target 搜索的最高质量（lossy 格式）")
     ap.add_argument("--max-dimension", type=int, default=None, help="限制长边像素（只缩小）")
     ap.add_argument("--min-scale", type=float, default=0.2,
                     help="--target 搜索时允许的最小缩放比例")
-    ap.add_argument("--scale-step", type=float, default=0.8, help="缩放阶梯等比系数")
     ap.add_argument("--to", default=None, metavar="FMT",
                     help="输出格式: original(默认,转回原格式) / jpg / png / webp / bmp / tiff")
     ap.add_argument("--bg", type=parse_color, default=(255, 255, 255),
