@@ -1,3 +1,4 @@
+# 项目已经迁移至github/phil616/resize-kit
 # resize-tools
 
 以"压小体积为目标"的压缩工具集,可直接下载Release里面的Windows的二进制
